@@ -1,8 +1,9 @@
 const express = require('express');
-const axios = require('axios');
+const axios   = require('axios');
 const cheerio = require('cheerio');
+const CryptoJS = require('crypto-js');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 const BASE_URL = 'https://oceantogames.com';
 
@@ -14,12 +15,12 @@ const HEADERS = {
 };
 
 const DL_HOSTS = [
-  'mega.nz', 'mega.co.nz', 'mediafire.com', 'drive.google.com',
-  'pixeldrain.com', '1fichier.com', 'uptobox.com', 'dropapk.to',
-  'clicknupload.co', 'clicknupload.to', 'sendit.cloud', 'datanodes.to',
-  'buzzheavier.com', 'gofile.io', 'rapidgator.net', 'uploaded.net',
-  'filecrypt.cc', 'multiup.io', 'hexupload.net', 'anonfiles.com',
-  'uploadhaven.com', 'mixdrop.ag', 'streamlare.com',
+  'mega.nz','mega.co.nz','mediafire.com','drive.google.com',
+  'pixeldrain.com','1fichier.com','uptobox.com','dropapk.to',
+  'clicknupload.co','clicknupload.to','sendit.cloud','datanodes.to',
+  'buzzheavier.com','gofile.io','rapidgator.net','uploaded.net',
+  'filecrypt.cc','multiup.io','hexupload.net','anonfiles.com',
+  'uploadhaven.com','mixdrop.ag','streamlare.com',
 ];
 
 function isDownloadUrl(href = '') {
@@ -38,56 +39,30 @@ function extractSpec(text, pattern) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STEP 1: Extract script URL from game page
-//  Finds: <script src="https://cjeriwek.cfd/?h=HASH&vis=ID">
+//  CryptoJS AES-JSON decrypt (same as browser)
 // ═══════════════════════════════════════════════════════════════════════════
-async function extractScriptUrl(gamePageHtml) {
-  // Match the external button script
-  const match = gamePageHtml.match(
-    /src=['"]?(https?:\/\/[^'">\s]+\?h=[^'">\s]+&vis=\d+)['"]?/i
-  );
-  return match ? match[1] : null;
+function cryptoJsAesDecrypt(jsonData, passphrase) {
+  try {
+    const obj = typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData;
+    const ct = CryptoJS.lib.CipherParams.create({
+      ciphertext: CryptoJS.enc.Base64.parse(obj.ct),
+    });
+    if (obj.iv) ct.iv = CryptoJS.enc.Hex.parse(obj.iv);
+    if (obj.s)  ct.salt = CryptoJS.enc.Hex.parse(obj.s);
+    const decrypted = CryptoJS.AES.decrypt(ct, passphrase);
+    return decrypted.toString(CryptoJS.enc.Utf8);
+  } catch (e) {
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  STEP 2: Fetch button script → get redirect URL (tredjsc.it.com)
-//  Script sets: var oldurl = 'https://tredjsc.it.com/?v=ID&s=BASE64'
+//  Extract download links from final page (dfbhve.it.com or wickradio)
 // ═══════════════════════════════════════════════════════════════════════════
-async function extractRedirectUrl(scriptUrl) {
-  const res = await axios.get(scriptUrl, { headers: HEADERS, timeout: 10000 });
-  const js = res.data;
-
-  // Extract oldurl
-  const match = js.match(/var\s+oldurl\s*=\s*['"]([^'"]+)['"]/);
-  return match ? match[1] : null;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  STEP 3: Fetch redirect page → get final URL (dfbhve.it.com)
-//  Page has: window.location.href = 'https://dfbhve.it.com/?suv=...'
-// ═══════════════════════════════════════════════════════════════════════════
-async function extractFinalUrl(redirectUrl) {
-  const res = await axios.get(redirectUrl, { headers: HEADERS, timeout: 10000 });
-  const html = res.data;
-
-  // Match finalRedirectURL or window.location.href
-  const match = html.match(
-    /(?:finalRedirectURL|window\.location\.href)\s*=\s*['"]([^'"]+)['"]/
-  );
-  return match ? match[1] : null;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  STEP 4: Fetch final page → extract real download links
-//  Page has: <input ... value="https://www.mediafire.com/...">
-//            or <a href="https://mega.nz/...">
-// ═══════════════════════════════════════════════════════════════════════════
-async function extractDownloadLinks(finalUrl) {
-  const res = await axios.get(finalUrl, { headers: HEADERS, timeout: 10000 });
-  const html = res.data;
+function extractLinksFromHtml(html) {
   const $ = cheerio.load(html);
   const links = [];
-  const seen = new Set();
+  const seen  = new Set();
 
   const addLink = (url, label, type) => {
     url = (url || '').trim().replace(/&amp;/g, '&');
@@ -97,108 +72,197 @@ async function extractDownloadLinks(finalUrl) {
     links.push({ label: (label || 'Download').trim(), url, type });
   };
 
-  // Input fields with download URLs (most common pattern)
-  $('input[type="text"], input[readonly]').each((_, el) => {
+  // Input fields
+  $('input[type="text"], input[readonly], input').each((_, el) => {
     const val = $(el).val() || $(el).attr('value') || '';
-    if (isDownloadUrl(val)) {
-      addLink(val, 'Direct Link', 'input');
-    }
+    if (isDownloadUrl(val)) addLink(val, 'Direct Link', 'input');
   });
 
-  // Anchor tags
+  // Anchors
   $('a').each((_, el) => {
     const href = $(el).attr('href') || '';
-    if (isDownloadUrl(href)) {
-      addLink(href, $(el).text() || 'Download', 'anchor');
-    }
+    if (isDownloadUrl(href)) addLink(href, $(el).text() || 'Download', 'anchor');
   });
 
-  // Regex scan entire HTML for DL host URLs
-  // Only add if no input/anchor already covers this host+path
-  const dlHostRx = /https?:\/\/(?:www\.)?(?:mega\.nz|mega\.co\.nz|mediafire\.com|drive\.google\.com|pixeldrain\.com|1fichier\.com|gofile\.io|buzzheavier\.com|datanodes\.to|clicknupload\.co|clicknupload\.to|sendit\.cloud|rapidgator\.net|uploaded\.net|filecrypt\.cc|multiup\.io|hexupload\.net|dropapk\.to|uptobox\.com|mixdrop\.ag)[^\s"'`<>\)\]\\]+/gi;
+  // Regex scan
+  const dlRx = /https?:\/\/(?:www\.)?(?:mega\.nz|mega\.co\.nz|mediafire\.com|drive\.google\.com|pixeldrain\.com|1fichier\.com|gofile\.io|buzzheavier\.com|datanodes\.to|clicknupload\.co|clicknupload\.to|sendit\.cloud|rapidgator\.net|uploaded\.net|filecrypt\.cc|multiup\.io|hexupload\.net|dropapk\.to|uptobox\.com|mixdrop\.ag)[^\s"'`<>)\]\\]+/gi;
   let m;
-  while ((m = dlHostRx.exec(html)) !== null) {
+  while ((m = dlRx.exec(html)) !== null) {
     const candidate = m[0].replace(/[.,;)]+$/, '');
-    // Skip if any already-seen URL starts with this candidate (it's a substring)
     const alreadyCovered = [...seen].some(s => s.startsWith(candidate) || candidate.startsWith(s));
-    if (!alreadyCovered) {
-      addLink(candidate, 'Auto-detected', 'regex');
-    }
+    if (!alreadyCovered) addLink(candidate, 'Auto-detected', 'regex');
   }
 
   return links;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  GET /api/directlink?game=GAME_URL
-//  Full 4-step chain resolver
+//  CHAIN STEP 1-4: cjeriwek → tredjsc → dfbhve
+// ═══════════════════════════════════════════════════════════════════════════
+async function resolveChain1(gameHtml) {
+  const scriptMatch = gameHtml.match(
+    /src=['"]?(https?:\/\/[^'">\s]+\?h=[^'">\s]+&vis=\d+)['"]?/i
+  );
+  if (!scriptMatch) return null;
+  const scriptUrl = scriptMatch[1];
+
+  const scriptRes = await axios.get(scriptUrl, { headers: HEADERS, timeout: 10000 });
+  const oldUrlMatch = scriptRes.data.match(/var\s+oldurl\s*=\s*['"]([^'"]+)['"]/);
+  if (!oldUrlMatch) return null;
+  const redirectUrl = oldUrlMatch[1];
+
+  const redirectRes = await axios.get(redirectUrl, { headers: HEADERS, timeout: 10000 });
+  const finalMatch = redirectRes.data.match(
+    /(?:finalRedirectURL|window\.location\.href)\s*=\s*['"]([^'"]+)['"]/
+  );
+  if (!finalMatch) return null;
+  const finalUrl = finalMatch[1];
+
+  const finalRes = await axios.get(finalUrl, { headers: HEADERS, timeout: 10000 });
+  const links = extractLinksFromHtml(finalRes.data);
+
+  return { scriptUrl, redirectUrl, finalUrl, links };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CHAIN STEP A-D: oceantogames wait-form → wickradio → AES decrypt
+// ═══════════════════════════════════════════════════════════════════════════
+async function resolveChain2(gameHtml) {
+  // Extract wait-for-resource form values
+  const formMatch = gameHtml.match(
+    /<form[^>]*wait-for-resource[^>]*>([\s\S]*?)<\/form>/i
+  );
+  if (!formMatch) return null;
+
+  const formHtml = formMatch[1];
+  const getValue = (name) => {
+    const m = formHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"']+)["']`, 'i'))
+           || formHtml.match(new RegExp(`value=["']([^"']+)["'][^>]*name=["']${name}["']`, 'i'));
+    return m ? m[1] : '';
+  };
+
+  const id       = getValue('id');
+  const filename = getValue('filename');
+  const filesize = getValue('filesize');
+
+  if (!id || !filename) return null;
+
+  // POST to wait-for-resource
+  const waitRes = await axios.post(
+    `${BASE_URL}/wait-for-resource/`,
+    new URLSearchParams({ id, filename, filesize }).toString(),
+    { headers: { ...HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
+  );
+  const waitHtml = waitRes.data;
+
+  // Extract wickradio form values
+  const wickMatch = waitHtml.match(
+    /<form[^>]*wickradio[^>]*>([\s\S]*?)<\/form>/i
+  );
+  if (!wickMatch) return null;
+
+  const wickHtml = wickMatch[1];
+  const getWickValue = (name) => {
+    const m = wickHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"']+)["']`, 'i'))
+           || wickHtml.match(new RegExp(`value=["']([^"']+)["'][^>]*name=["']${name}["']`, 'i'));
+    return m ? m[1] : '';
+  };
+
+  const w_id       = getWickValue('id')       || id;
+  const w_filename = getWickValue('filename') || filename;
+  const w_filesize = getWickValue('filesize') || filesize;
+
+  // POST to wickradio
+  const wickRes = await axios.post(
+    'https://wickradio.com/Please-Wait.php',
+    new URLSearchParams({ id: w_id, filename: w_filename, filesize: w_filesize }).toString(),
+    { headers: { ...HEADERS, 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': BASE_URL }, timeout: 15000 }
+  );
+  const wickPage = wickRes.data;
+
+  // Extract encrypted data + key
+  const encMatch  = wickPage.match(/hgeyioahwuk\s*=\s*'(\{[^']+\})'/);
+  const keyMatch  = wickPage.match(/vexgoijaada\s*=\s*'([^']+)'/);
+
+  if (!encMatch || !keyMatch) return null;
+
+  const encData   = encMatch[1];
+  const passphrase = keyMatch[1];
+
+  // Decrypt with CryptoJS
+  const decrypted = cryptoJsAesDecrypt(encData, passphrase);
+  if (!decrypted) return null;
+
+  // decrypted should be a URL
+  const links = [];
+  if (isDownloadUrl(decrypted)) {
+    links.push({ label: 'Decrypted Link', url: decrypted, type: 'aes-decrypt' });
+  } else {
+    // Maybe it's JSON or HTML with links
+    const extraLinks = extractLinksFromHtml(decrypted);
+    links.push(...extraLinks);
+  }
+
+  return {
+    formData: { id, filename, filesize },
+    wickradioUrl: 'https://wickradio.com/Please-Wait.php',
+    encryptedData: encData.substring(0, 50) + '...',
+    passphrase,
+    decrypted,
+    links,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GET /api/directlink?game=GAME_URL  (tries BOTH chains)
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/api/directlink', async (req, res) => {
   const gameUrl = (req.query.game || '').trim();
   if (!gameUrl) return res.status(400).json({ success: false, error: '?game= URL required' });
 
-  const chain = { gameUrl };
-
   try {
-    // ── Step 1: Fetch game page ──────────────────────────────────────────
-    const pageRes = await axios.get(gameUrl, { headers: HEADERS, timeout: 20000 });
+    const pageRes  = await axios.get(gameUrl, { headers: HEADERS, timeout: 20000 });
     const gameHtml = pageRes.data;
 
-    // ── Step 2: Extract button script URL ───────────────────────────────
-    const scriptUrl = await extractScriptUrl(gameHtml);
-    if (!scriptUrl) {
-      return res.json({
-        success: false,
-        error: 'Button script URL not found in page',
-        chain,
-      });
-    }
-    chain.scriptUrl = scriptUrl;
+    // Run both chains in parallel
+    const [chain1Result, chain2Result] = await Promise.allSettled([
+      resolveChain1(gameHtml),
+      resolveChain2(gameHtml),
+    ]);
 
-    // ── Step 3: Fetch script → get redirect URL ──────────────────────────
-    const redirectUrl = await extractRedirectUrl(scriptUrl);
-    if (!redirectUrl) {
-      return res.json({
-        success: false,
-        error: 'Redirect URL not found in button script',
-        chain,
-      });
-    }
-    chain.redirectUrl = redirectUrl;
+    const c1 = chain1Result.status === 'fulfilled' ? chain1Result.value : null;
+    const c2 = chain2Result.status === 'fulfilled' ? chain2Result.value : null;
 
-    // ── Step 4: Fetch redirect page → get final URL ──────────────────────
-    const finalUrl = await extractFinalUrl(redirectUrl);
-    if (!finalUrl) {
-      return res.json({
-        success: false,
-        error: 'Final URL not found in redirect page',
-        chain,
-      });
-    }
-    chain.finalUrl = finalUrl;
+    // Merge all links
+    const allLinks = [
+      ...(c1?.links || []),
+      ...(c2?.links || []),
+    ];
 
-    // ── Step 5: Fetch final page → extract real download links ───────────
-    const links = await extractDownloadLinks(finalUrl);
+    // Deduplicate
+    const seen = new Set();
+    const links = allLinks.filter(l => {
+      if (seen.has(l.url)) return false;
+      seen.add(l.url);
+      return true;
+    });
 
     return res.json({
       success: true,
       count: links.length,
-      chain,
+      chain1: c1 ? { scriptUrl: c1.scriptUrl, redirectUrl: c1.redirectUrl, finalUrl: c1.finalUrl } : null,
+      chain2: c2 ? { formData: c2.formData, passphrase: c2.passphrase, decrypted: c2.decrypted } : null,
       links,
       sourceUrl: gameUrl,
     });
 
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-      chain,
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  GET /api/search?game=GAME_NAME
+//  GET /api/search
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/api/search', async (req, res) => {
   const gameName = (req.query.game || '').trim();
@@ -210,33 +274,26 @@ app.get('/api/search', async (req, res) => {
       params: { search: gameName, per_page: 10, _embed: true, orderby: 'relevance' },
       timeout: 15000,
     });
-
     const results = wpRes.data.map(post => ({
-      id: post.id,
-      title: cleanText(post.title?.rendered || ''),
-      link: post.link,
+      id:      post.id,
+      title:   cleanText(post.title?.rendered || ''),
+      link:    post.link,
       excerpt: cleanText(post.excerpt?.rendered || '').substring(0, 200),
-      date: post.date,
-      image:
-        post._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium?.source_url ||
-        post._embedded?.['wp:featuredmedia']?.[0]?.source_url || null,
+      date:    post.date,
+      image:   post._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium?.source_url
+            || post._embedded?.['wp:featuredmedia']?.[0]?.source_url || null,
     }));
-
     return res.json({ success: true, count: results.length, source: 'wp-rest-api', results });
   } catch (err) {
     try {
-      const html = await axios.get(`${BASE_URL}/`, {
-        headers: HEADERS,
-        params: { s: gameName },
-        timeout: 15000,
-      });
+      const html = await axios.get(`${BASE_URL}/`, { headers: HEADERS, params: { s: gameName }, timeout: 15000 });
       const $ = cheerio.load(html.data);
       const results = [];
       $('article, .post').each((_, el) => {
         const a = $(el).find('h2 a, h1 a').first();
         const title = a.text().trim();
-        const link = a.attr('href');
-        const img = $(el).find('img').first().attr('src') || null;
+        const link  = a.attr('href');
+        const img   = $(el).find('img').first().attr('src') || null;
         const excerpt = $(el).find('.entry-summary, p').first().text().trim().substring(0, 200);
         if (title && link) results.push({ title, link, image: img, excerpt });
       });
@@ -248,7 +305,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  GET /api/data?game=GAME_URL
+//  GET /api/data
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/api/data', async (req, res) => {
   const gameUrl = (req.query.game || '').trim();
@@ -280,20 +337,12 @@ app.get('/api/data', async (req, res) => {
 
     const specs = {};
     const sv = (p) => extractSpec(rawText, p);
-    const ver = sv(/Game Version\s*[:\s]+([v\d.]+)/i);
-    if (ver) specs.version = ver;
-    const sz = sv(/(?:Game\s+)?Download\s+Size\s*[:\s]+([\d.]+ ?(?:GB|MB|TB))/i);
-    if (sz) specs.size = sz;
-    const iL = sv(/Interface Language\s*[:\s]+([A-Za-z, /]+?)(?= Audio| Game| MD5|$)/i);
-    if (iL) specs.interfaceLanguage = iL.trim();
-    const aL = sv(/Audio Language\s*[:\s]+([A-Za-z, /]+?)(?= Interface| Game| MD5|$)/i);
-    if (aL) specs.audioLanguage = aL.trim();
-    const fn = sv(/Game File Name\s*[:\s]+([^\s[\]]+\.(?:zip|rar|iso|exe))/i);
-    if (fn) specs.filename = fn;
-    const md5 = sv(/MD5SUM\s*[:\s]+([a-fA-F0-9]{32})/i);
-    if (md5) specs.md5 = md5;
-    const rp = sv(/(?:Uploader|Re\s*packer)\s*(?:Group)?\s*[:\s]+([A-Za-z0-9\- ]+?)(?= Game| Interface| MD5|$)/i);
-    if (rp && rp.trim().length > 1) specs.repacker = rp.trim();
+    const ver = sv(/Game Version\s*[:\s]+([v\d.]+)/i);         if (ver) specs.version = ver;
+    const sz  = sv(/(?:Game\s+)?Download\s+Size\s*[:\s]+([\d.]+ ?(?:GB|MB|TB))/i); if (sz)  specs.size = sz;
+    const iL  = sv(/Interface Language\s*[:\s]+([A-Za-z, /]+?)(?= Audio| Game| MD5|$)/i); if (iL)  specs.interfaceLanguage = iL.trim();
+    const aL  = sv(/Audio Language\s*[:\s]+([A-Za-z, /]+?)(?= Interface| Game| MD5|$)/i);  if (aL)  specs.audioLanguage = aL.trim();
+    const fn  = sv(/Game File Name\s*[:\s]+([^\s[\]]+\.(?:zip|rar|iso|exe))/i);            if (fn)  specs.filename = fn;
+    const md5 = sv(/MD5SUM\s*[:\s]+([a-fA-F0-9]{32})/i);      if (md5) specs.md5 = md5;
 
     const categories = [];
     $('a[rel="category tag"]').each((_, el) => {
@@ -304,11 +353,9 @@ app.get('/api/data', async (req, res) => {
     let minReqs = [], recReqs = [];
     const minBlock = rawText.match(/Minimum:\s*(.+?)(?=Recommended:|Click on the|Free Download$)/i);
     const recBlock = rawText.match(/Recommended:\s*(.+?)(?=Free Download|Click on the|$)/i);
-    const parseReqBlock = (block) =>
-      block.split(/(?=OS|Processor|Memory|Graphics|Storage|DirectX|Network|Additional|Sound)/i)
-        .map(s => s.trim()).filter(s => s.length > 3);
-    if (minBlock) minReqs = parseReqBlock(minBlock[1]);
-    if (recBlock) recReqs = parseReqBlock(recBlock[1]);
+    const parseReq = (b) => b.split(/(?=OS|Processor|Memory|Graphics|Storage|DirectX|Network|Additional|Sound)/i).map(s => s.trim()).filter(s => s.length > 3);
+    if (minBlock) minReqs = parseReq(minBlock[1]);
+    if (recBlock) recReqs = parseReq(recBlock[1]);
 
     const screenshots = [];
     $('article img, .entry-content img, .post img, #content img').each((_, el) => {
@@ -335,47 +382,43 @@ app.get('/api/data', async (req, res) => {
 app.get('/api/latest', async (req, res) => {
   const page  = parseInt(req.query.page)  || 1;
   const limit = Math.min(parseInt(req.query.limit) || 10, 50);
-
   try {
     const wpRes = await axios.get(`${BASE_URL}/wp-json/wp/v2/posts`, {
       headers: HEADERS,
       params: { per_page: limit, page, _embed: true, orderby: 'date', order: 'desc' },
       timeout: 15000,
     });
-
     const results = wpRes.data.map(post => ({
-      id: post.id,
-      title: cleanText(post.title?.rendered || ''),
-      link: post.link,
+      id:      post.id,
+      title:   cleanText(post.title?.rendered || ''),
+      link:    post.link,
       excerpt: cleanText(post.excerpt?.rendered || '').substring(0, 200),
-      date: post.date,
-      image:
-        post._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium?.source_url ||
-        post._embedded?.['wp:featuredmedia']?.[0]?.source_url || null,
+      date:    post.date,
+      image:   post._embedded?.['wp:featuredmedia']?.[0]?.media_details?.sizes?.medium?.source_url
+            || post._embedded?.['wp:featuredmedia']?.[0]?.source_url || null,
     }));
-
     res.json({ success: true, page, count: results.length, results });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── Root ────────────────────────────────────────────────────────────────────
+// ── Root ───────────────────────────────────────────────────────────────────
 app.get('/', (_, res) => res.json({
   name: '🎮 OceanGames Scraper API',
-  version: '3.0.0',
-  by: 'Black Cat Studio',
+  version: '4.0.0',
+  by: 'Black Cat Studio 🐱',
   endpoints: {
-    search:     { path: '/api/search?game=GAME_NAME',   example: '/api/search?game=gta+5' },
-    data:       { path: '/api/data?game=GAME_URL',       example: '/api/data?game=https://oceantogames.com/dead-cells-v20260616-free-download/' },
-    directlink: { path: '/api/directlink?game=GAME_URL', example: '/api/directlink?game=https://oceantogames.com/dead-cells-v20260616-free-download/' },
-    latest:     { path: '/api/latest?page=1&limit=10',  example: '/api/latest?limit=5' },
+    search:     '/api/search?game=GAME_NAME',
+    data:       '/api/data?game=GAME_URL',
+    directlink: '/api/directlink?game=GAME_URL',
+    latest:     '/api/latest?page=1&limit=10',
   },
 }));
 
 app.listen(PORT, () => {
   console.log(`╔══════════════════════════════════╗`);
-  console.log(`║  OceanGames API v3  — Port ${PORT}  ║`);
+  console.log(`║  OceanGames API v4  — Port ${PORT}  ║`);
   console.log(`║  Black Cat Studio 🐱              ║`);
   console.log(`╚══════════════════════════════════╝`);
 });
