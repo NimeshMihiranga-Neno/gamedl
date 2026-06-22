@@ -1,0 +1,31 @@
+{
+  "name": "oceangames-scraper-api",
+  "version": "1.0.0",
+  "description": "OceanOfGames.com scraper REST API by Black Cat Studio",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "keywords": [
+    "scraper",
+    "oceangames",
+    "games",
+    "api",
+    "black-cat-studio"
+  ],
+  "author": "Black Cat Studio",
+  "license": "MIT"
+}
+
