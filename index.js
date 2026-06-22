@@ -162,12 +162,30 @@ app.get('/api/data', async (req, res) => {
     const rp = sv(/(?:Uploader|Re\s*packer)\s*(?:Group)?\s*[:\s]+([A-Za-z0-9\- ]+?)(?= Game| Interface| MD5|$)/i);
     if (rp && rp.trim().length > 1) specs.repacker = rp.trim();
 
-    // ── Categories: links pointing to /category/ ────────────────────────
+    // ── Categories: only from post meta (rel="category tag"), NOT nav ──
     const categories = [];
-    $('a[href*="/category/"]').each((_, el) => {
+
+    // Strategy 1: WordPress standard — only set on post meta links, not nav
+    $('a[rel="category tag"]').each((_, el) => {
       const cat = $(el).text().trim();
       if (cat && !categories.includes(cat)) categories.push(cat);
     });
+
+    // Strategy 2: Fallback — links with title containing "topics" (WP post meta pattern)
+    if (categories.length === 0) {
+      $('a[href*="/category/"][title*="topic"]').each((_, el) => {
+        const cat = $(el).text().trim();
+        if (cat && !categories.includes(cat)) categories.push(cat);
+      });
+    }
+
+    // Strategy 3: Look inside article / entry-meta only (not whole body)
+    if (categories.length === 0) {
+      $('article a[href*="/category/"], .entry-meta a[href*="/category/"], .cat-links a').each((_, el) => {
+        const cat = $(el).text().trim();
+        if (cat && !categories.includes(cat)) categories.push(cat);
+      });
+    }
 
     // ── System requirements from body text ──────────────────────────────
     let minReqs = [];
@@ -220,72 +238,96 @@ app.get('/api/directlink', async (req, res) => {
 
   try {
     const response = await axios.get(gameUrl, { headers: HEADERS, timeout: 20000 });
-    const $ = cheerio.load(response.data);
+    const html = response.data;
+    const $ = cheerio.load(html);
 
     const links = [];
     const seen = new Set();
 
+    // ── STRICT filter: must be truly external (not oceantogames.com) ─────
     const addLink = (href, label, type) => {
       href = (href || '').trim();
-      if (!href || href === '#' || href.startsWith('javascript') || seen.has(href)) return;
+      if (!href) return;
+      if (href === '#') return;
+      if (href.startsWith('javascript')) return;
+      if (href.startsWith('/')) return;                          // relative paths
+      if (href.includes('oceantogames.com')) return;            // internal links
+      if (href.includes('wordpress.com')) return;               // WP assets
+      if (href.includes('gravatar.com')) return;                // avatars
+      if (seen.has(href)) return;
       seen.add(href);
       links.push({ label: (label || 'Download').trim(), url: href, type });
     };
 
-    // Strategy 1: <a> tags pointing directly to DL hosts
+    // ── S1: <a> tags pointing to known DL hosts ──────────────────────────
     $('a').each((_, el) => {
       const href = $(el).attr('href') || '';
-      if (isDownloadUrl(href)) addLink(href, $(el).text(), 'direct');
+      if (isDownloadUrl(href)) addLink(href, $(el).text() || 'Download', 'direct');
     });
 
-    // Strategy 2: onclick handlers
+    // ── S2: onclick → window.open / location.href ────────────────────────
     $('[onclick]').each((_, el) => {
       const oc = $(el).attr('onclick') || '';
       const m = oc.match(/(?:window\.open|location(?:\.href)?\s*=)\s*['"](.+?)['"]/);
-      if (m) addLink(m[1], $(el).text(), 'onclick');
+      if (m) addLink(m[1], $(el).text() || 'Download', 'onclick');
     });
 
-    // Strategy 3: Download-keyword links (shortener / redirect wrappers)
-    $('a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (!href || href === '#' || href.startsWith('javascript') || seen.has(href)) return;
-      if (href.startsWith(BASE_URL)) return;
-      const txt = $(el).text().toLowerCase();
-      const dlKw = ['download', 'click here', 'direct link', 'link 1', 'link 2',
-                    'link 3', 'part 1', 'part 2', 'google drive', 'mega', 'mediafire',
-                    'get game', 'torrent', 'magnet'];
-      if (dlKw.some(k => txt.includes(k))) addLink(href, $(el).text(), 'keyword');
-    });
-
-    // Strategy 4: data-href / data-url / data-link attributes
-    $('[data-href],[data-url],[data-link],[data-download]').each((_, el) => {
+    // ── S3: data-* attributes ─────────────────────────────────────────────
+    $('[data-href],[data-url],[data-link],[data-download],[data-src]').each((_, el) => {
       const h = $(el).attr('data-href') || $(el).attr('data-url') ||
-                $(el).attr('data-link') || $(el).attr('data-download');
-      addLink(h, $(el).text(), 'data-attr');
+                $(el).attr('data-link') || $(el).attr('data-download') ||
+                $(el).attr('data-src');
+      if (h) addLink(h, $(el).text() || 'Download', 'data-attr');
     });
 
-    // Strategy 5: hidden divs / modals / popup containers
-    $('[id*="download"],[class*="download"],[id*="modal"],[class*="popup"],[id*="link"]').find('a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (href && href !== '#' && !href.startsWith('javascript')) {
-        addLink(href, $(el).text(), 'modal');
+    // ── S4: iframes pointing to external pages ────────────────────────────
+    $('iframe').each((_, el) => {
+      const src = $(el).attr('src') || '';
+      if (src) addLink(src, 'Embedded Frame', 'iframe');
+    });
+
+    // ── S5: DL host URLs anywhere in raw HTML (inside JS / JSON / attrs) ─
+    const dlHostRx = /https?:\/\/(?:www\.)?(?:mega\.nz|mega\.co\.nz|mediafire\.com|drive\.google\.com|docs\.google\.com\/uc|pixeldrain\.com|1fichier\.com|gofile\.io|buzzheavier\.com|datanodes\.to|clicknupload\.co|clicknupload\.to|sendit\.cloud|rapidgator\.net|uploaded\.net|filecrypt\.cc|multiup\.io|hexupload\.net|dropapk\.to|uptobox\.com|anonfiles\.com|mixdrop\.ag)[^\s"'`<>\)\]\\]+/gi;
+    let m;
+    while ((m = dlHostRx.exec(html)) !== null) {
+      addLink(m[0].replace(/[.,;]+$/, ''), 'Auto-detected', 'html-regex');
+    }
+
+    // ── S6: <script> tags — look for URLs ending in archive extensions ───
+    $('script:not([src])').each((_, el) => {
+      const src = $(el).html() || '';
+      const archiveRx = /https?:\/\/[^\s"'`\\]+\.(?:zip|rar|iso|exe|7z|tar|gz)[^\s"'`\\]*/gi;
+      let am;
+      while ((am = archiveRx.exec(src)) !== null) {
+        addLink(am[0], 'Script-archive', 'script');
       }
     });
 
-    // Strategy 6: raw URL regex on full HTML (catches URLs in scripts/strings)
-    const html = response.data;
-    const urlRegex = /https?:\/\/(?:www\.)?(?:mega\.nz|mediafire\.com|drive\.google\.com|pixeldrain\.com|1fichier\.com|gofile\.io|buzzheavier\.com|datanodes\.to)[^\s"'<>)]+/gi;
-    let match;
-    while ((match = urlRegex.exec(html)) !== null) {
-      addLink(match[0], 'Auto-detected', 'html-regex');
-    }
+    // ── S7: keyword-matched external links (redirect/shortener wrappers) ─
+    $('a').each((_, el) => {
+      const href = ($(el).attr('href') || '').trim();
+      if (!href || seen.has(href)) return;
+      // Must be truly external
+      if (href.startsWith('javascript') || href.startsWith('/') ||
+          href.includes('oceantogames.com')) return;
+
+      const txt = $(el).text().toLowerCase();
+      const dlKw = ['direct link', 'link 1', 'link 2', 'link 3',
+                    'part 1', 'part 2', 'part 3', 'mirror',
+                    'google drive', 'mega', 'mediafire', 'gdrive', 'magnet'];
+      if (dlKw.some(k => txt.includes(k))) {
+        addLink(href, $(el).text(), 'keyword');
+      }
+    });
+
+    const jsPopupNote = links.length === 0
+      ? '⚠️ No static download links found. oceantogames.com uses a JavaScript popup for downloads — static scraping cannot capture them. Use Playwright (headless browser) to click the Download button and capture the popup links.'
+      : null;
 
     res.json({
       success: true,
       count: links.length,
-      note: links.length === 0
-        ? 'No links found statically. Site may use JS popup — try Playwright upgrade.'
-        : null,
+      note: jsPopupNote,
       links,
       sourceUrl: gameUrl,
     });
