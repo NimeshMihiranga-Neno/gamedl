@@ -114,10 +114,16 @@ async function extractDownloadLinks(finalUrl) {
   });
 
   // Regex scan entire HTML for DL host URLs
+  // Only add if no input/anchor already covers this host+path
   const dlHostRx = /https?:\/\/(?:www\.)?(?:mega\.nz|mega\.co\.nz|mediafire\.com|drive\.google\.com|pixeldrain\.com|1fichier\.com|gofile\.io|buzzheavier\.com|datanodes\.to|clicknupload\.co|clicknupload\.to|sendit\.cloud|rapidgator\.net|uploaded\.net|filecrypt\.cc|multiup\.io|hexupload\.net|dropapk\.to|uptobox\.com|mixdrop\.ag)[^\s"'`<>\)\]\\]+/gi;
   let m;
   while ((m = dlHostRx.exec(html)) !== null) {
-    addLink(m[0].replace(/[.,;]+$/, ''), 'Auto-detected', 'regex');
+    const candidate = m[0].replace(/[.,;)]+$/, '');
+    // Skip if any already-seen URL starts with this candidate (it's a substring)
+    const alreadyCovered = [...seen].some(s => s.startsWith(candidate) || candidate.startsWith(s));
+    if (!alreadyCovered) {
+      addLink(candidate, 'Auto-detected', 'regex');
+    }
   }
 
   return links;
