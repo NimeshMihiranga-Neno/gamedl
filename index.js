@@ -128,10 +128,12 @@ async function resolveChain1(gameHtml) {
 //  CHAIN STEP A-D: oceantogames wait-form → wickradio → AES decrypt
 // ═══════════════════════════════════════════════════════════════════════════
 async function resolveChain2(gameHtml) {
+  const debugLog = [];
   // Extract wait-for-resource form values
   // Malformed HTML fix — grab 800 chars from wait-for-resource
   const formStart = gameHtml.indexOf('wait-for-resource');
-  if (formStart < 0) return null;
+  debugLog.push('formStart: ' + formStart);
+  if (formStart < 0) return { debug: debugLog, error: 'wait-for-resource not found' };
   const formHtml = gameHtml.substring(formStart, formStart + 800);
   const getValue = (name) => {
     // name="X" ... value="Y" pattern
@@ -149,7 +151,8 @@ async function resolveChain2(gameHtml) {
   const filename = getValue('filename');
   const filesize = getValue('filesize');
 
-  if (!id || !filename) return null;
+  debugLog.push('id: ' + id + ' | filename: ' + filename + ' | filesize: ' + filesize);
+  if (!id || !filename) return { debug: debugLog, error: 'form values not found' };
 
   // POST to wait-for-resource
   const waitRes = await axios.post(
@@ -158,14 +161,15 @@ async function resolveChain2(gameHtml) {
     { headers: { ...HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
   );
   const waitHtml = waitRes.data;
+  debugLog.push('waitHtml length: ' + waitHtml.length);
+  debugLog.push('wickradio found: ' + waitHtml.includes('wickradio'));
 
   // Extract wickradio form values
-  const wickMatch = waitHtml.match(
-    /<form[^>]*wickradio[^>]*>([\s\S]*?)<\/form>/i
-  );
-  if (!wickMatch) return null;
+  const wickStart = waitHtml.indexOf('wickradio');
+  debugLog.push('wickStart: ' + wickStart);
+  if (wickStart < 0) return { debug: debugLog, error: 'wickradio not found in waitHtml' };
+  const wickHtml = waitHtml.substring(wickStart, wickStart + 600);
 
-  const wickHtml = wickMatch[1];
   const getWickValue = (name) => {
     const m = wickHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"']+)["']`, 'i'))
            || wickHtml.match(new RegExp(`value=["']([^"']+)["'][^>]*name=["']${name}["']`, 'i'));
@@ -188,7 +192,8 @@ async function resolveChain2(gameHtml) {
   const encMatch  = wickPage.match(/hgeyioahwuk\s*=\s*'(\{[^']+\})'/);
   const keyMatch  = wickPage.match(/vexgoijaada\s*=\s*'([^']+)'/);
 
-  if (!encMatch || !keyMatch) return null;
+  debugLog.push('encMatch: ' + !!encMatch + ' | keyMatch: ' + !!keyMatch);
+  if (!encMatch || !keyMatch) return { debug: debugLog, error: 'encrypted data not found', encMatch: !!encMatch, keyMatch: !!keyMatch };
 
   const encData   = encMatch[1];
   const passphrase = keyMatch[1];
