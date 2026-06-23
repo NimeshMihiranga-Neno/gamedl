@@ -129,6 +129,7 @@ async function resolveChain1(gameHtml) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function resolveChain2(gameHtml) {
   const debugLog = [];
+  try {
   // Extract wait-for-resource form values
   // Malformed HTML fix — grab 800 chars from wait-for-resource
   const formStart = gameHtml.indexOf('wait-for-resource');
@@ -220,6 +221,13 @@ async function resolveChain2(gameHtml) {
     decrypted,
     links,
   };
+  } catch(err) {
+    return { 
+      error: err.message, 
+      debug: debugLog,
+      step: debugLog[debugLog.length - 1] || 'unknown'
+    };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -240,7 +248,9 @@ app.get('/api/directlink', async (req, res) => {
     ]);
 
     const c1 = chain1Result.status === 'fulfilled' ? chain1Result.value : null;
-    const c2 = chain2Result.status === 'fulfilled' ? chain2Result.value : null;
+    const c2 = chain2Result.status === 'fulfilled' 
+      ? chain2Result.value 
+      : { error: chain2Result.reason?.message || 'unknown error' };
 
     // Merge all links
     const allLinks = [
