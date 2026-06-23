@@ -134,8 +134,14 @@ async function resolveChain2(gameHtml) {
   if (formStart < 0) return null;
   const formHtml = gameHtml.substring(formStart, formStart + 800);
   const getValue = (name) => {
-    const m = formHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"']+)["']`, 'i'))
-           || formHtml.match(new RegExp(`value=["']([^"']+)["'][^>]*name=["']${name}["']`, 'i'));
+    // name="X" ... value="Y" pattern
+    let m = formHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"'>]+)["']`, 'i'));
+    if (m) return m[1];
+    // value="Y" ... name="X" pattern  
+    m = formHtml.match(new RegExp(`value=["']([^"'>]+)["'][^>]*name=["']${name}["']`, 'i'));
+    if (m) return m[1];
+    // name="X" then value="Y" on next attribute anywhere nearby
+    m = formHtml.match(new RegExp(`name=["']${name}["'][\s\S]{0,50}?value=["']([^"'>]+)["']`, 'i'));
     return m ? m[1] : '';
   };
 
