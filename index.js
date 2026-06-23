@@ -129,12 +129,10 @@ async function resolveChain1(gameHtml) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function resolveChain2(gameHtml) {
   // Extract wait-for-resource form values
-  const formMatch = gameHtml.match(
-    /<form[^>]*wait-for-resource[^>]*>([\s\S]*?)<\/form>/i
-  );
-  if (!formMatch) return null;
-
-  const formHtml = formMatch[1];
+  // Malformed HTML fix — grab 800 chars from wait-for-resource
+  const formStart = gameHtml.indexOf('wait-for-resource');
+  if (formStart < 0) return null;
+  const formHtml = gameHtml.substring(formStart, formStart + 800);
   const getValue = (name) => {
     const m = formHtml.match(new RegExp(`name=["']${name}["'][^>]*value=["']([^"']+)["']`, 'i'))
            || formHtml.match(new RegExp(`value=["']([^"']+)["'][^>]*name=["']${name}["']`, 'i'));
@@ -422,4 +420,3 @@ app.listen(PORT, () => {
   console.log(`║  Black Cat Studio 🐱              ║`);
   console.log(`╚══════════════════════════════════╝`);
 });
-
