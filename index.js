@@ -260,7 +260,7 @@ app.get('/api/directlink', async (req, res) => {
       success: true,
       count: links.length,
       chain1: c1 ? { scriptUrl: c1.scriptUrl, redirectUrl: c1.redirectUrl, finalUrl: c1.finalUrl } : null,
-      chain2: c2 ? { formData: c2.formData, passphrase: c2.passphrase, decrypted: c2.decrypted } : null,
+      chain2: c2 || null,
       links,
       sourceUrl: gameUrl,
     });
@@ -415,7 +415,7 @@ app.get('/api/latest', async (req, res) => {
 // ── Root ───────────────────────────────────────────────────────────────────
 app.get('/', (_, res) => res.json({
   name: '🎮 OceanGames Scraper API',
-  version: '4.0.0',
+  version: '5.0.0',
   by: 'Black Cat Studio 🐱',
   endpoints: {
     search:     '/api/search?game=GAME_NAME',
@@ -427,7 +427,8 @@ app.get('/', (_, res) => res.json({
 
 app.listen(PORT, () => {
   console.log(`╔══════════════════════════════════╗`);
-  console.log(`║  OceanGames API v4  — Port ${PORT}  ║`);
+  console.log(`║  OceanGames API v5  — Port ${PORT}  ║`);
   console.log(`║  Black Cat Studio 🐱              ║`);
   console.log(`╚══════════════════════════════════╝`);
 });
+
